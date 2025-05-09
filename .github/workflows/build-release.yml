@@ -42,12 +42,19 @@ jobs:
           echo "Cloning CoreDNS source repository..."
           git clone --depth 1 ${{ env.COREDNS_REPO_URL }} coredns_source_temp
           
+          
           if [ ! -f ./plugin.cfg ]; then
             echo "错误: plugin.cfg 未在仓库根目录找到!"
             exit 1
           fi
-          
           cd coredns_source_temp
+          cp ../plugin.cfg ./plugin.cfg
+          
+          echo "--- coredns_source_temp/plugin.cfg 内容预览 (替换后) ---"
+          cat ./plugin.cfg
+          echo "---------------------------------------------------------"
+         
+          
           go generate coredns.go
           go get
           # 定义目标平台和对应的输出文件名
