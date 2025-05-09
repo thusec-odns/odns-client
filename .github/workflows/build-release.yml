@@ -101,14 +101,7 @@ jobs:
           cat ./plugin.cfg
           echo "---------------------------------------------------------"
 
-          echo "正在运行 'go get' 获取插件 (基于 plugin.cfg 中的定义): ${{ env.COREDNS_PLUGIN_IMPORT_PATH }}"
-          go get ${{ env.COREDNS_PLUGIN_IMPORT_PATH }}
-          echo "正在运行 'go mod tidy'..."
-          go mod tidy
-          
-          echo "正在运行 'go generate ./...'..."
-          go generate ./... # CoreDNS 通常使用此命令运行所有代码生成器
-
+    
           echo "正在为 ${{ matrix.goos }}/${{ matrix.goarch }} 使用 make 构建 CoreDNS..."
           export CGO_ENABLED=0
           export GOOS=${{ matrix.goos }}
@@ -116,7 +109,7 @@ jobs:
           
           # CoreDNS 的 Makefile 通常有一个 'coredns' 目标或默认目标来构建二进制文件
           # 它应该会尊重 GOOS 和 GOARCH 环境变量
-          make coredns # 或者直接 'make'
+          make
           
           # 确定 'make' 生成的二进制文件的实际名称
           # Makefile 通常在当前目录 (即 coredns_source_temp) 生成 'coredns' 或 'coredns.exe'
