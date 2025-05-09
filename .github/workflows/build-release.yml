@@ -1,0 +1,244 @@
+name: Build and Release CoreDNS Controller
+
+on:
+  push:
+    tags:
+      - 'v*.*.*' # 例如 v1.0.0, v1.2.3
+
+env:
+  APP_NAME: CoreDNSController
+  GO_VERSION: '1.21' # 指定 Go 版本
+  PYTHON_VERSION: '3.9' # 指定 Python 版本
+  COREDNS_REPO_URL: 'https://github.com/coredns/coredns.git' # 仍然需要克隆官方源码结构
+  COREDNS_PLUGIN_IMPORT_PATH: 'github.com/reflyable/odns/vpn-send' # 您的插件导入路径，用于 go get
+
+jobs:
+  build-and-package:
+    name: Build App (${{ matrix.os_display }}-${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os_display: Windows
+            os_runner: windows-latest
+            goos: windows
+            goarch: amd64
+            python_arch: x64
+            coredns_output_name: coredns.exe
+            archive_format: zip
+            final_artifact_suffix: windows-amd64.zip
+          - os_display: Linux
+            os_runner: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            python_arch: x64
+            coredns_output_name: coredns
+            archive_format: tar.gz
+            final_artifact_suffix: linux-amd64.tar.gz
+          - os_display: macOS
+            os_runner: macos-13
+            goos: darwin
+            goarch: amd64
+            python_arch: x64
+            coredns_output_name: coredns
+            archive_format: dmg
+            final_artifact_suffix: macos-amd64.dmg
+          - os_display: macOS
+            os_runner: macos-14
+            goos: darwin
+            goarch: arm64
+            python_arch: arm64
+            coredns_output_name: coredns
+            archive_format: dmg
+            final_artifact_suffix: macos-arm64.dmg
+    runs-on: ${{ matrix.os_runner }}
+    outputs:
+      artifact_name: ${{ env.APP_NAME }}-${{ matrix.final_artifact_suffix }}
+      artifact_path: ./${{ env.APP_NAME }}-${{ matrix.final_artifact_suffix }}
+
+    steps:
+      - name: Checkout Application Code (including custom plugin.cfg)
+        uses: actions/checkout@v4
+
+      - name: Verify custom plugin.cfg exists in repository
+        shell: bash
+        run: |
+          if [ ! -f "./plugin.cfg" ]; then
+            echo "错误: 项目仓库根目录下未找到 plugin.cfg 文件!"
+            exit 1
+          fi
+          echo "项目仓库中的 plugin.cfg 文件已找到。"
+          echo "--- 本地 plugin.cfg 内容预览 ---"
+          cat ./plugin.cfg
+          echo "---------------------------------"
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Build Custom CoreDNS using local plugin.cfg
+        shell: bash
+        run: |
+          echo "正在克隆 CoreDNS 官方仓库源码结构: ${{ env.COREDNS_REPO_URL }}"
+          git clone --depth 1 ${{ env.COREDNS_REPO_URL }} coredns_source_temp
+          cd coredns_source_temp
+          
+          echo "正在使用项目仓库中的 plugin.cfg 覆盖 CoreDNS 源码中的 plugin.cfg"
+          # 从工作区根目录 (上一级) 复制 plugin.cfg 到 coredns_source_temp 目录
+          cp ../plugin.cfg ./plugin.cfg
+          
+          echo "--- coredns_source_temp/plugin.cfg 内容预览 (替换后) ---"
+          cat ./plugin.cfg
+          echo "---------------------------------------------------------"
+
+          echo "正在运行 'go get' 获取插件 (基于被覆盖的 plugin.cfg 中的定义): ${{ env.COREDNS_PLUGIN_IMPORT_PATH }}"
+          # go get 应该能够从 plugin.cfg 中解析出所有需要的插件并获取它们
+          # 如果您的 plugin.cfg 正确列出了所有插件及其导入路径，
+          # 理论上 go mod tidy 或 go work sync (如果有 go.work) 应该能处理。
+          # 为了确保您的特定插件被获取，我们仍然可以显式 get 它。
+          go get ${{ env.COREDNS_PLUGIN_IMPORT_PATH }}
+          echo "正在运行 'go mod tidy'..."
+          go mod tidy
+          
+          echo "正在运行 'go generate ./...'..."
+          go generate ./...
+
+          echo "正在为 ${{ matrix.goos }}/${{ matrix.goarch }} 构建 CoreDNS..."
+          export CGO_ENABLED=0
+          export GOOS=${{ matrix.goos }}
+          export GOARCH=${{ matrix.goarch }}
+          go build -v -o "../${{ matrix.coredns_output_name }}" -ldflags="-s -w" .
+          
+          cd .. # 返回到工作区根目录
+          if [ ! -f "./${{ matrix.coredns_output_name }}" ]; then
+            echo "错误: CoreDNS (${{ matrix.coredns_output_name }}) 构建失败!"
+            exit 1
+          fi
+          echo "CoreDNS (${{ matrix.coredns_output_name }}) 构建成功，位于 $(pwd)"
+          ls -l ./${{ matrix.coredns_output_name }}
+          # 清理临时克隆的 CoreDNS 源码
+          rm -rf coredns_source_temp
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          architecture: ${{ matrix.python_arch }}
+
+      - name: Install Python Dependencies and Build Tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt # 包含 PyQt6, psutil
+          pip install pyinstaller # PyInstaller 用于打包
+          if [[ "${{ matrix.goos }}" == "darwin" ]]; then
+            pip install dmgbuild # dmgbuild 用于创建 macOS DMG
+          fi
+
+      - name: Install UPX (Optional, for smaller executables)
+        uses: crazy-max/ghaction-upx@v3
+        with:
+          version: latest
+
+      - name: Package PyQt6 Application using build_app.py
+        shell: bash
+        run: |
+          echo "当前工作目录: $(pwd)"
+          echo "正在运行 build_app.py..."
+          ls -la # 列出文件，确认 coredns 和 corefile 存在
+          python build_app.py # build_app.py 应将 coredns 和 corefile 打包
+
+          echo "PyInstaller 构建完成。检查 dist/ 目录..."
+          ls -lR dist/
+          if [[ "${{ matrix.goos }}" == "darwin" ]]; then
+            if [ ! -d "./dist/${{ env.APP_NAME }}.app" ]; then
+              echo "错误: 未找到 macOS .app 包: ./dist/${{ env.APP_NAME }}.app"
+              exit 1
+            fi
+          elif [[ "${{ matrix.goos }}" == "windows" ]]; then
+            if [ ! -f "./dist/${{ env.APP_NAME }}.exe" ]; then
+              echo "错误: 未找到 Windows .exe 文件: ./dist/${{ env.APP_NAME }}.exe"
+              exit 1
+            fi
+          else # Linux
+            if [ ! -f "./dist/${{ env.APP_NAME }}" ]; then
+              echo "错误: 未找到 Linux 可执行文件: ./dist/${{ env.APP_NAME }}"
+              exit 1
+            fi
+          fi
+          echo "PyQt6 应用打包成功。"
+
+      - name: Archive Application for Release
+        shell: bash
+        run: |
+          ARCHIVE_NAME="${{ env.APP_NAME }}-${{ matrix.final_artifact_suffix }}"
+          echo "正在创建归档文件: ${ARCHIVE_NAME}"
+          cd dist 
+
+          if [[ "${{ matrix.archive_format }}" == "dmg" ]]; then
+            cd .. 
+            echo "正在创建 DMG 文件..."
+            dmgbuild -s dmg_settings.py "${{ env.APP_NAME }} ${{ matrix.goarch }}" "${ARCHIVE_NAME}" "./dist/${{ env.APP_NAME }}.app"
+            if [ ! -f "${ARCHIVE_NAME}" ]; then
+              echo "错误: DMG 文件创建失败: ${ARCHIVE_NAME}"
+              exit 1
+            fi
+          elif [[ "${{ matrix.archive_format }}" == "zip" ]]; then
+            zip -r "../${ARCHIVE_NAME}" . 
+            cd ..
+          elif [[ "${{ matrix.archive_format }}" == "tar.gz" ]]; then
+            tar -czvf "../${ARCHIVE_NAME}" . 
+            cd ..
+          else
+            echo "错误: 未知的归档格式: ${{ matrix.archive_format }}"
+            exit 1
+          fi
+          echo "归档文件 ${ARCHIVE_NAME} 创建成功。"
+          ls -l "${ARCHIVE_NAME}" 
+
+      - name: Upload Application Artifact for Release
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.APP_NAME }}-${{ matrix.final_artifact_suffix }}
+          path: ./${{ env.APP_NAME }}-${{ matrix.final_artifact_suffix }}
+
+  create-release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: build-and-package
+    permissions:
+      contents: write
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./release-artifacts/
+
+      - name: List downloaded artifacts for verification
+        run: |
+          echo "已下载的构建产物:"
+          ls -R ./release-artifacts
+          echo "预期的产物名称 (基于 matrix output):"
+          # This shows how you might access outputs if they were defined per-job directly
+          # For this setup, the artifact names are constructed and known.
+          # echo "Windows: ${{ needs.build-and-package.outputs.artifact_name_windows-amd64 }}" # Example if outputs were structured differently
+
+      - name: Create Release and Upload Assets
+        uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Release ${{ github.ref_name }}
+          body: |
+            自动发布版本 ${{ github.ref_name }}。
+            包含 CoreDNS Controller 应用程序和自定义 CoreDNS 二进制文件。
+            **注意**: 如果您在 macOS 上遇到 "无法打开，因为来自未经验证的开发者" 的问题，
+            请尝试在终端中使用 `xattr -cr /Applications/${{ env.APP_NAME }}.app` 命令。
+          draft: false
+          prerelease: false
+          files: |
+            ./release-artifacts/${{ env.APP_NAME }}-windows-amd64.zip/${{ env.APP_NAME }}-windows-amd64.zip
+            ./release-artifacts/${{ env.APP_NAME }}-linux-amd64.tar.gz/${{ env.APP_NAME }}-linux-amd64.tar.gz
+            ./release-artifacts/${{ env.APP_NAME }}-macos-amd64.dmg/${{ env.APP_NAME }}-macos-amd64.dmg
+            ./release-artifacts/${{ env.APP_NAME }}-macos-arm64.dmg/${{ env.APP_NAME }}-macos-arm64.dmg
