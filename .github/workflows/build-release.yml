@@ -6,7 +6,7 @@ on:
       - 'v*.*.*' # 例如 v1.0.0, v1.2.3
 
 env:
-  APP_NAME: CoreDNSController
+  APP_NAME: ODNSController
   GO_VERSION: '1.21' # 指定 Go 版本
   PYTHON_VERSION: '3.9' # 指定 Python 版本
   COREDNS_REPO_URL: 'https://github.com/coredns/coredns.git' # 仍然需要克隆官方源码结构
