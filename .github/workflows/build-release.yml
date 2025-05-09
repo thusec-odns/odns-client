@@ -41,16 +41,16 @@ jobs:
             goarch: amd64
             python_arch: x64
             coredns_output_name: coredns # PyInstaller 将查找此名称
-            archive_format: dmg
-            final_artifact_suffix: macos-amd64.dmg
+            archive_format: zip
+            final_artifact_suffix: macos-amd64.zip
           - os_display: macOS
             os_runner: macos-15
             goos: darwin
             goarch: arm64
             python_arch: arm64
             coredns_output_name: coredns # PyInstaller 将查找此名称
-            archive_format: dmg
-            final_artifact_suffix: macos-arm64.dmg
+            archive_format: zip
+            final_artifact_suffix: macos-arm64.zip
     runs-on: ${{ matrix.os_runner }}
     outputs:
       artifact_name: ${{ env.APP_NAME }}-${{ matrix.final_artifact_suffix }}
@@ -168,8 +168,8 @@ jobs:
           echo "PyInstaller 构建完成。检查 dist/ 目录..."
           ls -lR dist/
           if [[ "${{ matrix.goos }}" == "darwin" ]]; then
-            if [ ! -d "./dist/${{ env.APP_NAME }}.app" ]; then
-              echo "错误: 未找到 macOS .app 包: ./dist/${{ env.APP_NAME }}.app"
+            if [ ! -d "./dist/${{ env.APP_NAME }}" ]; then
+              echo "错误: 未找到 macOS 包: ./dist/${{ env.APP_NAME }}"
               exit 1
             fi
           elif [[ "${{ matrix.goos }}" == "windows" ]]; then

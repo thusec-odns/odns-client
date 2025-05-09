@@ -2,14 +2,18 @@ import PyInstaller.__main__
 import os
 import platform
 import shutil
+import sys
+import io
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 
-APP_NAME = "CoreDNSController"
+APP_NAME = "ODNSController"
 MAIN_SCRIPT = "main_app.py"
 ICON_BASE_NAME = "app_icon" # app_icon.ico for Windows, app_icon.icns for macOS
 
 # --- Platform Specific Configuration ---
 current_os = platform.system().lower()
-console_type = True  # True for console (macOS/Linux debug), False for no console (Windows GUI)
+console_type = False  # True for console (macOS/Linux debug), False for no console (Windows GUI)
 icon_file = None
 coredns_binary_name = "coredns"
 
@@ -31,6 +35,7 @@ pyinstaller_options = [
     "--clean",     # 构建前清理 PyInstaller 缓存
     # "--noupx",   # 如果 UPX 导致问题，取消此行注释
     "--uac-admin"
+    # "--windowed"
 ]
 
 if console_type:
