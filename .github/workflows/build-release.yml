@@ -24,7 +24,7 @@ jobs:
             goos: windows
             goarch: amd64
             python_arch: x64
-            coredns_output_name: coredns.exe
+            coredns_output_name: coredns.exe # PyInstaller 将查找此名称
             archive_format: zip
             final_artifact_suffix: windows-amd64.zip
           - os_display: Linux
@@ -32,7 +32,7 @@ jobs:
             goos: linux
             goarch: amd64
             python_arch: x64
-            coredns_output_name: coredns
+            coredns_output_name: coredns # PyInstaller 将查找此名称
             archive_format: tar.gz
             final_artifact_suffix: linux-amd64.tar.gz
           - os_display: macOS
@@ -40,7 +40,7 @@ jobs:
             goos: darwin
             goarch: amd64
             python_arch: x64
-            coredns_output_name: coredns
+            coredns_output_name: coredns # PyInstaller 将查找此名称
             archive_format: dmg
             final_artifact_suffix: macos-amd64.dmg
           - os_display: macOS
@@ -48,7 +48,7 @@ jobs:
             goos: darwin
             goarch: arm64
             python_arch: arm64
-            coredns_output_name: coredns
+            coredns_output_name: coredns # PyInstaller 将查找此名称
             archive_format: dmg
             final_artifact_suffix: macos-arm64.dmg
     runs-on: ${{ matrix.os_runner }}
@@ -77,48 +77,80 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
 
-      - name: Build Custom CoreDNS using local plugin.cfg
-        shell: bash
+      - name: Install Make (Windows only)
+        if: matrix.goos == 'windows'
+        shell: pwsh # PowerShell for choco
+        run: |
+          Write-Host "正在 Windows 上安装 Make..."
+          choco install make --no-progress -y
+          # 验证 make 是否在 PATH 中
+          (Get-Command make).Path
+          Write-Host "Make 安装完成 (或已存在)。"
+
+      - name: Build Custom CoreDNS using local plugin.cfg and Make
+        shell: bash # bash 保证脚本在各平台行为一致
         run: |
           echo "正在克隆 CoreDNS 官方仓库源码结构: ${{ env.COREDNS_REPO_URL }}"
           git clone --depth 1 ${{ env.COREDNS_REPO_URL }} coredns_source_temp
           cd coredns_source_temp
           
           echo "正在使用项目仓库中的 plugin.cfg 覆盖 CoreDNS 源码中的 plugin.cfg"
-          # 从工作区根目录 (上一级) 复制 plugin.cfg 到 coredns_source_temp 目录
           cp ../plugin.cfg ./plugin.cfg
           
           echo "--- coredns_source_temp/plugin.cfg 内容预览 (替换后) ---"
           cat ./plugin.cfg
           echo "---------------------------------------------------------"
 
-          echo "正在运行 'go get' 获取插件 (基于被覆盖的 plugin.cfg 中的定义): ${{ env.COREDNS_PLUGIN_IMPORT_PATH }}"
-          # go get 应该能够从 plugin.cfg 中解析出所有需要的插件并获取它们
-          # 如果您的 plugin.cfg 正确列出了所有插件及其导入路径，
-          # 理论上 go mod tidy 或 go work sync (如果有 go.work) 应该能处理。
-          # 为了确保您的特定插件被获取，我们仍然可以显式 get 它。
+          echo "正在运行 'go get' 获取插件 (基于 plugin.cfg 中的定义): ${{ env.COREDNS_PLUGIN_IMPORT_PATH }}"
           go get ${{ env.COREDNS_PLUGIN_IMPORT_PATH }}
           echo "正在运行 'go mod tidy'..."
           go mod tidy
           
           echo "正在运行 'go generate ./...'..."
-          go generate 
+          go generate ./... # CoreDNS 通常使用此命令运行所有代码生成器
 
-          echo "正在为 ${{ matrix.goos }}/${{ matrix.goarch }} 构建 CoreDNS..."
+          echo "正在为 ${{ matrix.goos }}/${{ matrix.goarch }} 使用 make 构建 CoreDNS..."
           export CGO_ENABLED=0
           export GOOS=${{ matrix.goos }}
           export GOARCH=${{ matrix.goarch }}
-          go build -v -o "../${{ matrix.coredns_output_name }}" -ldflags="-s -w" .
+          
+          # CoreDNS 的 Makefile 通常有一个 'coredns' 目标或默认目标来构建二进制文件
+          # 它应该会尊重 GOOS 和 GOARCH 环境变量
+          make coredns # 或者直接 'make'
+          
+          # 确定 'make' 生成的二进制文件的实际名称
+          # Makefile 通常在当前目录 (即 coredns_source_temp) 生成 'coredns' 或 'coredns.exe'
+          BUILT_BINARY_IN_SOURCE_DIR="coredns"
+          if [[ "${{ matrix.goos }}" == "windows" ]]; then
+            if [ -f "./coredns.exe" ]; then
+              BUILT_BINARY_IN_SOURCE_DIR="coredns.exe"
+            elif [ ! -f "./coredns" ]; then # 再次检查，以防万一
+               echo "错误: make 后在 coredns_source_temp/ 中未找到 coredns 或 coredns.exe!"
+               ls -la . # 列出文件以供调试
+               exit 1
+            fi
+          elif [ ! -f "./coredns" ]; then
+            echo "错误: make 后在 coredns_source_temp/ 中未找到 coredns!"
+            ls -la . # 列出文件以供调试
+            exit 1
+          fi
+          
+          echo "make 构建完成，在 coredns_source_temp/ 中生成的二进制文件是: ${BUILT_BINARY_IN_SOURCE_DIR}"
+          # 将编译结果从 coredns_source_temp 移动到工作区根目录，并重命名为 matrix.coredns_output_name
+          # matrix.coredns_output_name 定义了 PyInstaller 期望的文件名 (例如 coredns.exe 或 coredns)
+          mv "./${BUILT_BINARY_IN_SOURCE_DIR}" "../${{ matrix.coredns_output_name }}"
           
           cd .. # 返回到工作区根目录
           if [ ! -f "./${{ matrix.coredns_output_name }}" ]; then
-            echo "错误: CoreDNS (${{ matrix.coredns_output_name }}) 构建失败!"
+            echo "错误: CoreDNS (${{ matrix.coredns_output_name }}) 移动或重命名失败!"
             exit 1
           fi
-          echo "CoreDNS (${{ matrix.coredns_output_name }}) 构建成功，位于 $(pwd)"
+          echo "CoreDNS (${{ matrix.coredns_output_name }}) 构建成功并移动到 $(pwd)"
           ls -l ./${{ matrix.coredns_output_name }}
           # 清理临时克隆的 CoreDNS 源码
+          echo "正在清理临时 CoreDNS 源码目录 coredns_source_temp..."
           rm -rf coredns_source_temp
+          echo "清理完成。"
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -184,10 +216,10 @@ jobs:
               exit 1
             fi
           elif [[ "${{ matrix.archive_format }}" == "zip" ]]; then
-            zip -r "../${ARCHIVE_NAME}" . 
+            zip -r -D "../${ARCHIVE_NAME}" .  # -D 确保不存储目录项的时间戳，可能有助于可重现构建
             cd ..
           elif [[ "${{ matrix.archive_format }}" == "tar.gz" ]]; then
-            tar -czvf "../${ARCHIVE_NAME}" . 
+            tar --mtime='1970-01-01 00:00Z' --sort=name --owner=0 --group=0 --numeric-owner -czvf "../${ARCHIVE_NAME}" . # 尝试创建可重现的 tar.gz
             cd ..
           else
             echo "错误: 未知的归档格式: ${{ matrix.archive_format }}"
@@ -218,11 +250,7 @@ jobs:
         run: |
           echo "已下载的构建产物:"
           ls -R ./release-artifacts
-          echo "预期的产物名称 (基于 matrix output):"
-          # This shows how you might access outputs if they were defined per-job directly
-          # For this setup, the artifact names are constructed and known.
-          # echo "Windows: ${{ needs.build-and-package.outputs.artifact_name_windows-amd64 }}" # Example if outputs were structured differently
-
+          
       - name: Create Release and Upload Assets
         uses: softprops/action-gh-release@v2
         env:
