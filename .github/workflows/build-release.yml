@@ -102,7 +102,7 @@ jobs:
           go mod tidy
           
           echo "正在运行 'go generate ./...'..."
-          go generate ./...
+          go generate 
 
           echo "正在为 ${{ matrix.goos }}/${{ matrix.goarch }} 构建 CoreDNS..."
           export CGO_ENABLED=0
