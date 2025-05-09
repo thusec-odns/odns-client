@@ -83,7 +83,7 @@ jobs:
           cd coredns_source_temp
           
           echo "正在修改 CoreDNS 源码中的 plugin.cfg"
-          sed -i '50 i vpn-send:github.com/reflyable/odns/vpn-send' plugin.cfg
+          sed -i '' '50 i vpn-send:github.com/reflyable/odns/vpn-send' plugin.cfg
           
           echo "--- coredns_source_temp/plugin.cfg 内容预览 (替换后) ---"
           cat ./plugin.cfg
@@ -153,13 +153,13 @@ jobs:
         with:
           version: latest
 
-      - name: Package PyQt6 Application using build_app.py
+      - name: Package PyQt6 Application using build.py
         shell: bash
         run: |
           echo "当前工作目录: $(pwd)"
-          echo "正在运行 build_app.py..."
+          echo "正在运行 build.py..."
           ls -la # 列出文件，确认 coredns 和 corefile 存在
-          python build_app.py # build_app.py 应将 coredns 和 corefile 打包
+          python build.py # build.py 应将 coredns 和 corefile 打包
 
           echo "PyInstaller 构建完成。检查 dist/ 目录..."
           ls -lR dist/
