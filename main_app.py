@@ -3,21 +3,23 @@ import os
 import platform
 import logging
 import threading # For CoreDNS output reading
+import time # For potential delays
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QTextEdit, QTabWidget, QMessageBox, QLabel, QSizePolicy
+    QPushButton, QTextEdit, QTabWidget, QMessageBox, QLabel, QSizePolicy,
+    QSpacerItem
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QObject, QTimer
-from PyQt6.QtGui import QIcon, QPalette, QColor # For styling (optional)
+from PyQt6.QtGui import QIcon, QPalette, QColor, QFont # For styling (optional)
 
 # Import utility modules
 from log_utils import setup_logging, QtLogHandler 
 from dns_utils import DNSManager
 from process_utils import CoreDNSProcessManager
 
-APP_NAME = "CoreDNS Controller (PyQt6)"
-VERSION = "1.0.2" # Incremented version
+APP_NAME = "ODNS Controller"
+VERSION = "1.0.0" # Incremented version for fixes
 
 # --- Global logger setup ---
 logger = logging.getLogger(__name__)
@@ -49,22 +51,22 @@ class CoreDNSOutputReader(QObject):
                 self.process_handle.stderr.close()
             
             return_code = self.process_handle.wait()
-            if self._is_running:
+            if self._is_running: # Only emit if not stopped externally
                  self.process_finished.emit(return_code)
         except Exception as e:
             if self._is_running:
                 self.new_log_message.emit(f"[AppWatcher] Error reading CoreDNS output: {e}")
-                self.process_finished.emit(-1)
+                self.process_finished.emit(-1) # Indicate error
         finally:
             logger.debug("CoreDNSOutputReader finished.")
 
     def stop(self):
         self._is_running = False
 
-# --- Worker for long operations (Start/Stop) ---
+# --- Worker for long operations (Start/Stop/Restart) ---
 class OperationWorker(QObject):
     finished = pyqtSignal(bool, str)
-    log_message = pyqtSignal(str)
+    log_message = pyqtSignal(str) # For intermediate logging from worker if needed
 
     def __init__(self, operation_func, *args):
         super().__init__()
@@ -84,20 +86,14 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(f"{APP_NAME} - v{VERSION}")
-        self.setGeometry(200, 200, 700, 550)
+        self.setGeometry(200, 200, 750, 600) # Adjusted size for new tab
 
-        # Determine base path (for executable or script)
         if getattr(sys, 'frozen', False):
-            # If the application is run as a bundle, the PyInstaller bootloader
-            # extends the sys module by a flag frozen=True.
             if hasattr(sys, '_MEIPASS'):
-                # For --onefile mode, _MEIPASS is the path to the temporary bundle folder
                 self.base_path = sys._MEIPASS
             else:
-                # For --onedir mode, the executable is in the bundle folder
                 self.base_path = os.path.dirname(sys.executable)
         else:
-            # Not bundled, running as a script
             self.base_path = os.path.dirname(os.path.abspath(__file__))
         
         logger.info(f"Application base path determined as: {self.base_path}")
@@ -105,21 +101,24 @@ class MainWindow(QMainWindow):
         self.dns_manager = DNSManager()
         
         coredns_exe_name = "coredns.exe" if platform.system().lower() == "windows" else "coredns"
-        # Paths for CoreDNS and corefile are now relative to the determined base_path
         coredns_exe_path = os.path.join(self.base_path, coredns_exe_name)
-        corefile_path = os.path.join(self.base_path, "corefile")
-        pid_file_path = os.path.join(self.base_path, "coredns.pid") # PID file can also be in base_path or a temp dir
+        corefile_path = os.path.join(self.base_path, "corefile") # Used by process_manager and editor
+        pid_file_path = os.path.join(self.base_path, "coredns.pid")
 
         self.process_manager = CoreDNSProcessManager(coredns_exe_path, corefile_path, pid_file_path)
 
         self.is_running = False
         self.operation_in_progress = False
-        self.is_exiting = False # Flag to manage controlled shutdown
+        self.is_exiting = False 
+        self.thread = None # Initialize thread attribute
+        self.worker = None # Initialize worker attribute
+
 
         self._init_ui()
         self._setup_app_logging()
 
         self._perform_startup_checks()
+        self.load_corefile_content_to_editor() # Load corefile on startup
         self.update_button_ui()
 
 
@@ -131,6 +130,7 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         self.layout.addWidget(self.tabs)
 
+        # --- Control Tab ---
         self.control_tab = QWidget()
         self.control_layout = QVBoxLayout(self.control_tab)
         self.control_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -161,6 +161,46 @@ class MainWindow(QMainWindow):
         self.control_layout.addStretch()
         self.tabs.addTab(self.control_tab, "主控制")
 
+        # --- Corefile Editor Tab ---
+        self.corefile_tab = QWidget()
+        self.corefile_layout = QVBoxLayout(self.corefile_tab)
+
+        self.corefile_text_edit = QTextEdit()
+        self.corefile_text_edit.setFont(QFont("Courier New", 10)) # Monospaced font for config
+        self.corefile_text_edit.setPlaceholderText("Corefile 内容将在此处显示和编辑...")
+        self.corefile_layout.addWidget(self.corefile_text_edit)
+
+        corefile_button_layout = QHBoxLayout()
+        self.load_corefile_button = QPushButton("重新加载 Corefile")
+        self.load_corefile_button.clicked.connect(self.load_corefile_content_to_editor)
+        corefile_button_layout.addWidget(self.load_corefile_button)
+        
+        corefile_button_layout.addSpacerItem(QSpacerItem(40, 20, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum))
+
+        self.save_restart_button = QPushButton("保存并重启服务")
+        self.save_restart_button.setStyleSheet("""
+            QPushButton {
+                background-color: #2196F3; /* Blueish */
+                color: white; 
+                font-weight: bold;
+                border-radius: 5px; /* Standard radius */
+                padding: 8px 15px;
+            }
+            QPushButton:hover {
+                background-color: #1976D2; /* Darker blue on hover */
+            }
+            QPushButton:disabled {
+                background-color: #B0BEC5; /* Greyish when disabled */
+            }
+        """)
+        self.save_restart_button.clicked.connect(self.handle_save_and_restart)
+        corefile_button_layout.addWidget(self.save_restart_button)
+        
+        self.corefile_layout.addLayout(corefile_button_layout)
+        self.tabs.addTab(self.corefile_tab, "Corefile 编辑")
+
+
+        # --- Log Tab ---
         self.log_tab = QWidget()
         self.log_layout = QVBoxLayout(self.log_tab)
         self.log_text_edit = QTextEdit()
@@ -175,26 +215,26 @@ class MainWindow(QMainWindow):
         self.qt_log_handler.log_signal.connect(self.append_log_message)
         logger.info(f"{APP_NAME} logging initialized.")
 
-    # _check_coredns_files now uses the instance's base_path
-    def _check_coredns_files_instance_method(self): # Renamed to avoid conflict if staticmethod was intended elsewhere
+    def _check_coredns_files_instance_method(self):
         coredns_exe_name = "coredns.exe" if platform.system().lower() == "windows" else "coredns"
         coredns_path = os.path.join(self.base_path, coredns_exe_name)
-        corefile_path = os.path.join(self.base_path, "corefile")
         errors = []
         if not os.path.exists(coredns_path):
             errors.append(f"CoreDNS 可执行文件未找到: {coredns_path}")
-        if not os.path.exists(corefile_path):
-            errors.append(f"Corefile 配置文件未找到: {corefile_path}")
+        if not os.path.exists(self.process_manager.corefile_path):
+            errors.append(f"Corefile 配置文件未找到: {self.process_manager.corefile_path}")
         return errors
 
     def _perform_startup_checks(self):
         logger.info("Performing startup checks...")
-        file_errors = self._check_coredns_files_instance_method() # Use the instance method
+        file_errors = self._check_coredns_files_instance_method()
         if file_errors:
             error_msg = "\n".join(file_errors)
             logger.critical(f"Startup file errors: {error_msg}")
             QMessageBox.critical(self, "启动错误", f"必要文件缺失:\n{error_msg}\n请确保 coredns 可执行文件和 corefile 在程序目录下 (或已正确打包)。")
             self.toggle_button.setEnabled(False)
+            self.save_restart_button.setEnabled(False)
+
 
         if not self.dns_manager.is_privileged():
             priv_msg = "权限不足。请使用管理员权限 (Windows) 或 sudo (Linux/macOS) 运行本程序。\nDNS 修改功能可能无法正常工作。"
@@ -203,7 +243,7 @@ class MainWindow(QMainWindow):
         else:
             logger.info("Sufficient privileges detected.")
         
-        if self.process_manager.is_running(): # process_manager now uses paths derived from self.base_path
+        if self.process_manager.is_running():
             logger.warning("CoreDNS appears to be running from a previous session (PID file found and process active).")
             QMessageBox.information(self, "提示", "检测到 CoreDNS 可能已在运行 (基于PID文件)。\n如果需要，请先手动停止或通过本程序尝试停止。")
 
@@ -213,13 +253,14 @@ class MainWindow(QMainWindow):
         self.log_text_edit.verticalScrollBar().setValue(self.log_text_edit.verticalScrollBar().maximum())
 
     def update_button_ui(self):
+        # Main toggle button
         if self.is_running:
             self.toggle_button.setText("运行中\n点击停止")
             self.toggle_button.setStyleSheet("""
                 QPushButton {
-                    background-color: #4CAF50; /* Green */
-                    color: white;
-                    font-size: 18px; font-weight: bold; border-radius: 10px; padding: 10px;
+                    background-color: #4CAF50; color: white; 
+                    font-size: 18px; font-weight: bold; 
+                    border-radius: 10px; padding: 10px;
                 }
                 QPushButton:hover { background-color: #45a049; }
                 QPushButton:disabled { background-color: #A5D6A7; }
@@ -229,9 +270,9 @@ class MainWindow(QMainWindow):
             self.toggle_button.setText("已停止\n点击开始")
             self.toggle_button.setStyleSheet("""
                 QPushButton {
-                    background-color: #f44336; /* Red */
-                    color: white;
-                    font-size: 18px; font-weight: bold; border-radius: 10px; padding: 10px;
+                    background-color: #f44336; color: white; 
+                    font-size: 18px; font-weight: bold; 
+                    border-radius: 10px; padding: 10px;
                 }
                 QPushButton:hover { background-color: #e53935; }
                 QPushButton:disabled { background-color: #EF9A9A; }
@@ -239,6 +280,9 @@ class MainWindow(QMainWindow):
             self.status_label.setText("状态: <font color='red'><b>已停止</b></font>")
         
         self.toggle_button.setEnabled(not self.operation_in_progress)
+        # Corefile editor buttons
+        self.load_corefile_button.setEnabled(not self.operation_in_progress)
+        self.save_restart_button.setEnabled(not self.operation_in_progress)
 
 
     def _start_operation(self, operation_func, *args):
@@ -247,7 +291,7 @@ class MainWindow(QMainWindow):
             return
 
         self.operation_in_progress = True
-        self.toggle_button.setEnabled(False)
+        self.update_button_ui() # Disables buttons
 
         self.thread = QThread()
         self.worker = OperationWorker(operation_func, *args)
@@ -257,12 +301,42 @@ class MainWindow(QMainWindow):
         self.worker.finished.connect(self.on_operation_finished)
         
         self.thread.started.connect(self.worker.run)
-        self.thread.finished.connect(self.thread.deleteLater)
-        self.worker.finished.connect(self.thread.quit)
-        self.worker.finished.connect(self.worker.deleteLater)
+        # self.thread.finished.connect(self.thread.deleteLater) # Removed: manage deletion in on_operation_finished
+        
+        # Worker signals thread to quit, then worker schedules its own deletion
+        self.worker.finished.connect(self.thread.quit) 
+        self.worker.finished.connect(self.worker.deleteLater) 
 
         self.thread.start()
 
+    def load_corefile_content_to_editor(self):
+        logger.info(f"Attempting to load corefile from: {self.process_manager.corefile_path}")
+        try:
+            if os.path.exists(self.process_manager.corefile_path):
+                with open(self.process_manager.corefile_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                    self.corefile_text_edit.setPlainText(content)
+                logger.info("Corefile content loaded into editor.")
+            else:
+                logger.warning("Corefile not found at specified path. Editor will be empty.")
+                self.corefile_text_edit.setPlainText("# Corefile 未找到或无法加载\n")
+                QMessageBox.warning(self, "加载失败", f"Corefile 文件未找到于:\n{self.process_manager.corefile_path}")
+        except Exception as e:
+            logger.error(f"Error loading corefile: {e}", exc_info=True)
+            self.corefile_text_edit.setPlainText(f"# 加载 Corefile 出错:\n# {e}\n")
+            QMessageBox.critical(self, "加载错误", f"加载 Corefile 时发生错误:\n{e}")
+
+    def save_corefile_from_editor(self):
+        logger.info(f"Attempting to save editor content to corefile: {self.process_manager.corefile_path}")
+        try:
+            content = self.corefile_text_edit.toPlainText()
+            with open(self.process_manager.corefile_path, 'w', encoding='utf-8') as f:
+                f.write(content)
+            logger.info("Corefile content saved from editor.")
+            return True, "Corefile 已成功保存。"
+        except Exception as e:
+            logger.error(f"Error saving corefile: {e}", exc_info=True)
+            return False, f"保存 Corefile 失败: {e}"
 
     def _execute_start_sequence(self):
         logger.info("Executing start sequence...")
@@ -279,7 +353,6 @@ class MainWindow(QMainWindow):
             self.dns_manager.restore_original_dns()
             return False, f"设置DNS到127.0.0.1失败: {msg_set_dns}"
         
-        # process_manager was initialized with paths derived from self.base_path
         success_start_proc, msg_start_proc, proc_handle = self.process_manager.start()
         if not success_start_proc:
             logger.error(f"启动CoreDNS进程失败: {msg_start_proc}. 尝试恢复原始DNS...")
@@ -307,23 +380,79 @@ class MainWindow(QMainWindow):
         self.is_running = False
         return True, f"服务已成功停止。({msg_stop_proc})"
 
+    def _execute_save_and_restart_sequence(self):
+        logger.info("Executing save and restart sequence...")
+        
+        success_save, msg_save = self.save_corefile_from_editor()
+        if not success_save:
+            return False, msg_save 
+
+        if self.is_running:
+            logger.info("Service is running, stopping before restart...")
+            self._stop_coredns_output_reader() 
+            stop_success, stop_msg = self.process_manager.stop()
+            if not stop_success:
+                logger.warning(f"Problem stopping CoreDNS during restart: {stop_msg}. Proceeding with start attempt.")
+            self.is_running = False 
+            time.sleep(0.5) 
+        
+        logger.info("Starting/Restarting CoreDNS service with new corefile...")
+        
+        if not self.is_running: 
+            if not self.dns_manager.is_privileged():
+                return False, "权限不足，无法设置DNS并启动服务。"
+            success_get_dns, msg_get_dns = self.dns_manager.get_original_dns() 
+            if not success_get_dns:
+                 logger.warning(f"获取原始DNS失败 (重启前): {msg_get_dns}")
+
+            success_set_dns, msg_set_dns = self.dns_manager.set_dns("127.0.0.1")
+            if not success_set_dns:
+                logger.error(f"设置DNS到127.0.0.1失败 (重启前): {msg_set_dns}.")
+                self.dns_manager.restore_original_dns()
+                return False, f"设置DNS到127.0.0.1失败 (重启前): {msg_set_dns}"
+
+        success_start_proc, msg_start_proc, proc_handle = self.process_manager.start()
+        if not success_start_proc:
+            logger.error(f"重启CoreDNS进程失败: {msg_start_proc}.")
+            return False, f"重启CoreDNS进程失败: {msg_start_proc}"
+
+        self.is_running = True
+        self._start_coredns_output_reader(proc_handle)
+        return True, "Corefile 已保存，服务已成功重启。"
+
 
     def on_operation_finished(self, success, message):
         logger.info(f"Operation finished. Success: {success}, Message: {message}")
+        
+        # Thread and worker cleanup
+        if self.thread is not None:
+            if self.thread.isRunning(): # Should have been quit by worker.finished signal
+                logger.debug("Waiting for operation thread to finish...")
+                self.thread.wait(2000) # Wait a bit longer
+            if self.thread.isRunning(): # Still running after wait
+                 logger.warning("Operation thread did not finish cleanly after quit and wait.")
+            self.thread.deleteLater() # Schedule QThread for deletion
+            self.thread = None
+        
+        # Worker is already connected to deleteLater via its finished signal.
+        # Setting self.worker to None helps prevent reuse of a potentially deleted object.
+        self.worker = None 
+
         self.operation_in_progress = False
-        self.update_button_ui()
+        self.update_button_ui() # Re-enable buttons
 
         if not success:
             QMessageBox.critical(self, "操作失败", message)
+        else:
+            if "重启" in message or "保存" in message : 
+                 QMessageBox.information(self, "操作成功", message)
         
-        if hasattr(self, 'thread') and self.thread is not None:
-            if self.thread.isRunning():
-                self.thread.quit()
-                self.thread.wait(1000)
-
         if self.is_exiting: 
             logger.info("Operation finished during exit sequence. Closing window.")
-            self.close()
+            # Ensure we are not in a recursive close
+            # self.is_exiting should ideally be reset if close is cancelled by user
+            # For now, assume this is the final close.
+            QTimer.singleShot(0, self.close) # Use QTimer to call close from event loop
 
 
     def handle_toggle_button(self):
@@ -337,6 +466,14 @@ class MainWindow(QMainWindow):
         else:
             logger.info("Start button pressed.")
             self._start_operation(self._execute_start_sequence)
+
+    def handle_save_and_restart(self):
+        if self.operation_in_progress:
+            QMessageBox.information(self, "请稍候", "当前有操作正在进行中。")
+            return
+        logger.info("Save and Restart button pressed.")
+        self._start_operation(self._execute_save_and_restart_sequence)
+
 
     def _start_coredns_output_reader(self, process_handle):
         if process_handle is None:
@@ -389,9 +526,27 @@ class MainWindow(QMainWindow):
             return
 
         if self.operation_in_progress:
-            QMessageBox.warning(self, "操作进行中", "正在执行关闭前操作，请稍候...")
-            event.ignore()
-            return
+            # If an operation is in progress, and we are not already in a controlled exit,
+            # ask the user if they want to cancel the exit.
+            if not self.is_exiting:
+                 reply = QMessageBox.question(self, '操作进行中',
+                                             "当前有操作正在进行中。您确定要退出吗？\n(这可能导致未完成的操作被中断)",
+                                             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                             QMessageBox.StandardButton.No)
+                 if reply == QMessageBox.StandardButton.No:
+                     logger.info("User cancelled exit due to ongoing operation.")
+                     event.ignore()
+                     return
+                 else: # User chose to exit despite ongoing operation
+                     logger.warning("User chose to exit despite ongoing operation. Attempting to stop reader.")
+                     self._stop_coredns_output_reader() # Best effort
+                     event.accept() # Allow exit, OS will handle child processes
+                     return 
+            else: # Already in controlled exit, but op still running (shouldn't happen if logic is right)
+                logger.warning("Operation still in progress during controlled exit. Ignoring close event for now.")
+                event.ignore()
+                return
+
 
         if self.is_running:
             reply = QMessageBox.question(self, '确认退出',
@@ -402,8 +557,10 @@ class MainWindow(QMainWindow):
             if reply == QMessageBox.StandardButton.Yes:
                 logger.info("User chose to stop CoreDNS and exit. Initiating controlled shutdown.")
                 self.is_exiting = True 
-                self.toggle_button.setEnabled(False) 
-                self._start_operation(self._execute_stop_sequence) 
+                # self.toggle_button.setEnabled(False) # update_button_ui will handle this
+                self.operation_in_progress = True # Manually set to disable buttons immediately
+                self.update_button_ui()
+                self._start_operation(self._execute_stop_sequence) # This is threaded
                 event.ignore() 
             elif reply == QMessageBox.StandardButton.No:
                 logger.info("User chose to exit without stopping CoreDNS (DNS will not be restored by app).")

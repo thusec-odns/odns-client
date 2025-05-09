@@ -317,11 +317,7 @@ jobs:
           tag_name: ${{ github.ref_name }}
           name: Release ${{ github.ref_name }}
           body: |
-            自动发布版本 ${{ github.ref_name }}。
-            包含 CoreDNS Controller 应用程序和自定义 CoreDNS 二进制文件。
-            **注意**: 如果您在 macOS 上遇到 "无法打开，因为来自未经验证的开发者" 的问题，
-            请尝试在终端中使用 `sudo xattr -cr /Applications/${{ env.APP_NAME }}.app` 命令 (如果安装到 Applications 目录)。
-            或者针对下载的 .app 文件: `xattr -cr path/to/your/${{ env.APP_NAME }}.app`
+            Release ${{ github.ref_name }}。
           draft: false
           prerelease: false
           files: | 
