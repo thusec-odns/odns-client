@@ -8,49 +8,25 @@ on:
 env:
   APP_NAME: ODNSController
   GO_VERSION: '1.21' # 指定 Go 版本
-  PYTHON_VERSION: '3.12' # 指定 Python 版本
+  PYTHON_VERSION: '3.9' # 指定 Python 版本
   COREDNS_REPO_URL: 'https://github.com/coredns/coredns.git'
-  # COREDNS_PLUGIN_IMPORT_PATH: 'github.com/reflyable/odns/vpn-send' # 您的插件导入路径 - 确保 plugin.cfg 正确引用
 
 jobs:
   build-coredns-on-linux:
-    name: Build CoreDNS (Cross-Compile on Linux for ${{ matrix.goos }}/${{ matrix.goarch }})
+    name: Build CoreDNS (Cross-Compile on Linux for all targets)
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - goos: windows
-            goarch: amd64
-            coredns_artifact_name_suffix: windows-amd64
-            built_binary_filename: coredns.exe # Output filename for this target
-          - goos: linux
-            goarch: amd64
-            coredns_artifact_name_suffix: linux-amd64
-            built_binary_filename: coredns
-          - goos: darwin
-            goarch: amd64
-            coredns_artifact_name_suffix: darwin-amd64
-            built_binary_filename: coredns
-          - goos: darwin # For macOS ARM64
-            goarch: arm64
-            coredns_artifact_name_suffix: darwin-arm64
-            built_binary_filename: coredns
-    outputs:
-      # Output to potentially reference artifact names later if needed, though direct naming is used here.
-      coredns_artifact_name: coredns-binary-${{ matrix.coredns_artifact_name_suffix }}
-      built_binary_filename: ${{ matrix.built_binary_filename }}
+    #移除了 strategy.matrix，此作业现在只运行一次
 
     steps:
-      - name: Checkout Application Code (for plugin.cfg)
+      - name: Checkout Application Code (for plugin.cfg) # 检出应用程序代码 (用于 plugin.cfg)
         uses: actions/checkout@v4
 
-      - name: Set up Go
+      - name: Set up Go # 设置 Go 环境
         uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
 
-      - name: Cache Go modules and build cache
+      - name: Cache Go modules and build cache # 缓存 Go 模块和构建缓存
         uses: actions/cache@v4
         with:
           path: |
@@ -60,92 +36,108 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-go-${{ env.GO_VERSION }}-
 
-      - name: Build Custom CoreDNS for ${{ matrix.goos }}/${{ matrix.goarch }}
+      - name: Build and Stage CoreDNS for all targets # 构建并准备所有目标的 CoreDNS
         shell: bash
-        env:
-          GOOS_TARGET: ${{ matrix.goos }}
-          GOARCH_TARGET: ${{ matrix.goarch }}
-          # This is the name of the binary file that 'make' should produce (e.g., coredns or coredns.exe)
-          # and will be the name of the file within the uploaded artifact.
-          COREDNS_OUTPUT_FILENAME: ${{ matrix.built_binary_filename }}
         run: |
-          echo "正在克隆 CoreDNS 官方仓库源码结构: ${{ env.COREDNS_REPO_URL }}"
+          echo "Cloning CoreDNS source repository..."
           git clone --depth 1 ${{ env.COREDNS_REPO_URL }} coredns_source_temp
-          cd coredns_source_temp
           
-          echo "正在修改 CoreDNS 源码中的 plugin.cfg (从仓库根目录复制)"
-          if [ ! -f ../plugin.cfg ]; then
+          if [ ! -f ./plugin.cfg ]; then
             echo "错误: plugin.cfg 未在仓库根目录找到!"
             exit 1
           fi
-          cp ../plugin.cfg ./plugin.cfg
           
-          echo "--- coredns_source_temp/plugin.cfg 内容预览 (替换后) ---"
-          cat ./plugin.cfg
-          echo "---------------------------------------------------------"
-          
+          cd coredns_source_temp
           go generate coredns.go
           go get
-          echo "正在为 $GOOS_TARGET/$GOARCH_TARGET 使用 make 构建 CoreDNS..."
-          export CGO_ENABLED=0 # 非常重要，用于交叉编译
-          export GOOS=$GOOS_TARGET
-          export GOARCH=$GOARCH_TARGET
-          
-          # CoreDNS 的 Makefile 通常有一个 'coredns' 目标或默认目标来构建二进制文件
-          # 它应该会尊重 GOOS 和 GOARCH 环境变量
-          go build # 或者直接 'make'，取决于 CoreDNS Makefile
-          
-          # 验证 'make' 生成的二进制文件的实际名称
-          # Makefile 通常在当前目录 (即 coredns_source_temp) 生成 'coredns' 或 'coredns.exe' (取决于 GOOS)
-          if [ ! -f "./${COREDNS_OUTPUT_FILENAME}" ]; then
-            echo "错误: make 后在 coredns_source_temp/ 中未找到预期的二进制文件: ./${COREDNS_OUTPUT_FILENAME}!"
-            echo "当前目录内容:"
-            ls -la . 
-            # 尝试查找 'coredns' (无扩展名) 以防万一，如果预期的是 .exe 但未生成
-            if [[ "$COREDNS_OUTPUT_FILENAME" == "coredns.exe" ]] && [ -f "./coredns" ]; then
-              echo "警告: 预期是 coredns.exe，但找到了 coredns。将使用 coredns。"
-              mv "./coredns" "../${COREDNS_OUTPUT_FILENAME}"
-            else
-              exit 1
+          # 定义目标平台和对应的输出文件名
+          # 格式: GOOS GOARCH ARTIFACT_SUFFIX STAGING_DIR_NAME EXPECTED_BINARY_IN_ARTIFACT
+          targets=(
+            "windows amd64 windows-amd64 upload_win coredns.exe"
+            "linux amd64 linux-amd64 upload_lin coredns"
+            "darwin amd64 darwin-amd64 upload_dar_amd64 coredns"
+            "darwin arm64 darwin-arm64 upload_dar_arm64 coredns"
+          )
+
+          for target_info in "${targets[@]}"; do
+            read -r goos_val goarch_val suffix_val staging_dir_name_val expected_binary_name_val <<< "$target_info"
+
+            echo "===================================================================="
+            echo "Building CoreDNS for $goos_val/$goarch_val"
+            echo "Staging to ../$staging_dir_name_val/$expected_binary_name_val"
+            echo "===================================================================="
+            
+            mkdir -p "../$staging_dir_name_val"
+            
+            echo "Copying plugin.cfg..."
+            cp ../plugin.cfg ./plugin.cfg
+            # echo "--- coredns_source_temp/plugin.cfg content ---"
+            # cat ./plugin.cfg
+            # echo "---------------------------------------------"
+
+            echo "Building with GOOS=$goos_val GOARCH=$goarch_val..."
+            CGO_ENABLED=0 GOOS=$goos_val GOARCH=$goarch_val go build -o ../$staging_dir_name_val/$expected_binary_name_val
+            
+  
+            if [ ! -f "../$staging_dir_name_val/$expected_binary_name_val" ]; then
+                echo "错误: 编译失败!"
+                exit 1
             fi
-          else
-             mv "./${COREDNS_OUTPUT_FILENAME}" "../${COREDNS_OUTPUT_FILENAME}"
-          fi
-          
+          done
+
           cd .. # 返回到工作区根目录
-          if [ ! -f "./${COREDNS_OUTPUT_FILENAME}" ]; then
-            echo "错误: CoreDNS (${COREDNS_OUTPUT_FILENAME}) 移动或重命名失败!"
-            exit 1
-          fi
-
-          echo "CoreDNS (${COREDNS_OUTPUT_FILENAME}) 构建成功并移动到 $(pwd)"
-          ls -l "./${COREDNS_OUTPUT_FILENAME}"
-          
-          echo "正在清理临时 CoreDNS 源码目录 coredns_source_temp..."
+          echo "Cleaning up CoreDNS source directory..."
           rm -rf coredns_source_temp
-          echo "清理完成。"
+          echo "All CoreDNS binaries built and staged for upload."
+          ls -lR upload_*
 
-      - name: Upload CoreDNS Binary Artifact for ${{ matrix.goos }}/${{ matrix.goarch }}
+      - name: Upload CoreDNS for Windows AMD64
         uses: actions/upload-artifact@v4
         with:
-          name: coredns-binary-${{ matrix.coredns_artifact_name_suffix }} # 例如 coredns-binary-windows-amd64
-          path: ./${{ matrix.built_binary_filename }} # 上传构建好的二进制文件
+          name: coredns-binary-windows-amd64 # Artifact 名称
+          path: ./upload_win/coredns.exe     # Artifact 内部文件名为 coredns.exe
+
+      - name: Upload CoreDNS for Linux AMD64
+        uses: actions/upload-artifact@v4
+        with:
+          name: coredns-binary-linux-amd64
+          path: ./upload_lin/coredns         # Artifact 内部文件名为 coredns
+
+      - name: Upload CoreDNS for Darwin AMD64
+        uses: actions/upload-artifact@v4
+        with:
+          name: coredns-binary-darwin-amd64
+          path: ./upload_dar_amd64/coredns   # Artifact 内部文件名为 coredns
+
+      - name: Upload CoreDNS for Darwin ARM64
+        uses: actions/upload-artifact@v4
+        with:
+          name: coredns-binary-darwin-arm64
+          path: ./upload_dar_arm64/coredns   # Artifact 内部文件名为 coredns
+      
+      - name: Cleanup staged directories after upload
+        if: always() # 无论之前的步骤是否成功，都尝试清理
+        shell: bash
+        run: |
+          echo "Cleaning up staged upload directories..."
+          rm -rf ./upload_win ./upload_lin ./upload_dar_amd64 ./upload_dar_arm64
+          echo "Cleanup complete."
 
   package-app:
-    name: Package App (${{ matrix.os_display }}-${{ matrix.arch }})
-    needs: build-coredns-on-linux
+    name: Package App (${{ matrix.os_display }}-${{ matrix.goarch }}) # 打包应用程序
+    needs: build-coredns-on-linux # 依赖 build-coredns-on-linux 任务
     strategy:
       fail-fast: false
       matrix:
         include:
           - os_display: Windows
             os_runner: windows-latest
-            goos: windows # 用于下载正确的 CoreDNS 和打包逻辑
-            goarch: amd64 # 用于下载正确的 CoreDNS
+            goos: windows 
+            goarch: amd64 
             python_arch: x64
-            coredns_artifact_download_suffix: windows-amd64 # 用于拼接下载的 artifact 名称
-            coredns_binary_filename_in_artifact: coredns.exe # CoreDNS 在 artifact 中的文件名
-            pyinstaller_expected_coredns_name: coredns.exe # PyInstaller 打包时期望的 CoreDNS 文件名
+            coredns_artifact_download_suffix: windows-amd64 
+            coredns_binary_filename_in_artifact: coredns.exe 
+            pyinstaller_expected_coredns_name: coredns.exe 
             archive_format: zip
             final_artifact_suffix: windows-amd64.zip
           - os_display: Linux
@@ -156,10 +148,10 @@ jobs:
             coredns_artifact_download_suffix: linux-amd64
             coredns_binary_filename_in_artifact: coredns
             pyinstaller_expected_coredns_name: coredns
-            archive_format: tar # tar.gz 会由 zip-release action 处理
+            archive_format: tar 
             final_artifact_suffix: linux-amd64.tar.gz
           - os_display: macOS-amd64
-            os_runner: macos-13 # 确保 runner 支持 amd64
+            os_runner: macos-13 
             goos: darwin
             goarch: amd64
             python_arch: x64
@@ -169,31 +161,31 @@ jobs:
             archive_format: zip
             final_artifact_suffix: macos-amd64.zip
           - os_display: macOS-arm64
-            os_runner: macos-14 # macos-14 是已知的 arm64 runner, 用户原为 macos-15
+            os_runner: macos-14 
             goos: darwin
             goarch: arm64
-            python_arch: arm64 # Python arch 必须是 arm64
+            python_arch: arm64 
             coredns_artifact_download_suffix: darwin-arm64
             coredns_binary_filename_in_artifact: coredns
             pyinstaller_expected_coredns_name: coredns
             archive_format: zip
             final_artifact_suffix: macos-arm64.zip
     runs-on: ${{ matrix.os_runner }}
-    outputs: # 这些 outputs 主要用于调试或被其他 job 引用 (如果需要)
+    outputs: 
       artifact_name: ${{ env.APP_NAME }}-${{ matrix.final_artifact_suffix }}
       artifact_path: ./${{ env.APP_NAME }}-${{ matrix.final_artifact_suffix }}
 
     steps:
-      - name: Checkout Application Code
+      - name: Checkout Application Code # 检出应用程序代码
         uses: actions/checkout@v4
 
-      - name: Download Pre-built CoreDNS binary
+      - name: Download Pre-built CoreDNS binary # 下载预构建的 CoreDNS 二进制文件
         uses: actions/download-artifact@v4
         with:
           name: coredns-binary-${{ matrix.coredns_artifact_download_suffix }}
           path: ./coredns_temp # 下载到临时目录
 
-      - name: Prepare CoreDNS binary for PyInstaller
+      - name: Prepare CoreDNS binary for PyInstaller # 为 PyInstaller 准备 CoreDNS 二进制文件
         shell: bash
         run: |
           echo "在 ./coredns_temp/ 中查找已下载的 CoreDNS 二进制文件..."
@@ -212,10 +204,11 @@ jobs:
           
           echo "CoreDNS 二进制文件 (${TARGET_BINARY_PATH}) 已准备好，位于 $(pwd)"
           ls -l "${TARGET_BINARY_PATH}"
-          rm -rf ./coredns_temp
-          echo "临时目录 ./coredns_temp 已清理。"
+          rm -rf ./coredns_temp # 清理临时下载目录，而非整个 coredns_temp 目录本身
+          echo "临时目录 ./coredns_temp (内容) 已清理。"
 
-      - name: Set up Python ${{ env.PYTHON_VERSION }}
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }} # 设置 Python 环境
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
@@ -223,41 +216,37 @@ jobs:
           cache: 'pip' # 启用 pip 缓存
           cache-dependency-path: 'requirements.txt' # 基于 requirements.txt 使缓存失效
 
-      - name: Install Python Dependencies and Build Tools
+      - name: Install Python Dependencies and Build Tools # 安装 Python 依赖和构建工具
         shell: bash
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt # 包含 PyQt6, psutil 等
-          pip install pyinstaller # PyInstaller 用于打包
+          pip install -r requirements.txt 
+          pip install pyinstaller 
           if [[ "${{ matrix.goos }}" == "darwin" ]]; then
-            pip install dmgbuild # dmgbuild 用于创建 macOS DMG
+            pip install dmgbuild 
           fi
       
-      - name: Install UPX (for final app compression on Win/Lin)
+      - name: Install UPX (for final app compression on Win/Lin) # 安装 UPX
         if: matrix.goos == 'linux' || matrix.goos == 'windows'
         uses: crazy-max/ghaction-upx@v3
         with:
-          version: latest # 或者指定一个版本 e.g., 4.2.4
+          version: latest 
 
-      - name: Package PyQt6 Application using build.py
+      - name: Package PyQt6 Application using build.py # 使用 build.py 打包 PyQt6 应用程序
         shell: bash
         run: |
           echo "当前工作目录: $(pwd)"
           echo "正在运行 build.py (应使用 '${{ matrix.pyinstaller_expected_coredns_name }}')..."
-          # 确保 build.py 知道 CoreDNS 二进制文件的名称 (matrix.pyinstaller_expected_coredns_name)
-          # 可能需要通过环境变量或修改 build.py 来传递这个名称
-          ls -la # 列出文件，确认 coredns (或 coredns.exe) 和 corefile 存在
-          python build.py # build.py 应将 coredns 和 corefile 打包
+          ls -la 
+          python build.py 
 
           echo "PyInstaller 构建完成。检查 dist/ 目录..."
           ls -lR dist/
-          # 验证输出的应用程序名称是否符合 APP_NAME
           EXPECTED_APP_PATH=""
           if [[ "${{ matrix.goos }}" == "darwin" ]]; then
             EXPECTED_APP_PATH="./dist/${{ env.APP_NAME }}.app"
             if [ ! -d "${EXPECTED_APP_PATH}" ]; then
               echo "错误: 未找到 macOS 应用包: ${EXPECTED_APP_PATH}"
-              # 尝试列出 dist/ 查看实际生成的内容
               find ./dist -maxdepth 1 -print
               exit 1
             fi
@@ -278,49 +267,42 @@ jobs:
           fi
           echo "PyQt6 应用打包成功: ${EXPECTED_APP_PATH}"
 
-      - name: Archive Application for Release
-        uses: thedoctor0/zip-release@0.7.5 # 注意: tar.gz 也是通过这个 action 的 type: 'tar' 实现
+      - name: Archive Application for Release # 归档应用程序以供发布
+        uses: thedoctor0/zip-release@0.7.5 
         with:
-          type: "${{matrix.archive_format}}" # 'zip' 或 'tar'
-          filename: "../${{ env.APP_NAME }}-${{ matrix.final_artifact_suffix }}" # 输出到上一级目录
-          directory: ./dist/ # 要打包的目录
-          # 对于 tar.gz，它会自动处理压缩。确保 final_artifact_suffix 包含 .gz
-          # 对于 .app (macOS)，通常是先 zip .app 目录。此 action 应该能处理。
+          type: "${{matrix.archive_format}}" 
+          filename: "../${{ env.APP_NAME }}-${{ matrix.final_artifact_suffix }}" 
+          directory: ./dist/ 
 
-      - name: Upload Application Artifact for Release
+      - name: Upload Application Artifact for Release # 上传应用程序 Artifact 以供发布
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.APP_NAME }}-${{ matrix.final_artifact_suffix }}
-          path: ./${{ env.APP_NAME }}-${{ matrix.final_artifact_suffix }} # 从上一级目录上传
+          path: ./${{ env.APP_NAME }}-${{ matrix.final_artifact_suffix }} 
 
   create-release:
-    name: Create GitHub Release
+    name: Create GitHub Release # 创建 GitHub Release
     runs-on: ubuntu-latest
-    needs: package-app # 依赖于所有平台的 package-app job 完成
+    needs: package-app 
     permissions:
-      contents: write # 需要权限来创建 release 和上传 assets
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') # 仅在打tag时运行
+      contents: write 
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') 
 
     steps:
-      - name: Download all build artifacts
+      - name: Download all build artifacts # 下载所有构建产物
         uses: actions/download-artifact@v4
         with:
-          path: ./release-artifacts/ # 所有 artifacts 会下载到此目录的子目录中
+          path: ./release-artifacts/ 
 
-      - name: List downloaded artifacts for verification
+      - name: List downloaded artifacts for verification # 列出已下载的构建产物以供验证
         run: |
           echo "已下载的构建产物:"
           ls -R ./release-artifacts
           echo "---------------------------"
           echo "准备上传的文件列表:"
-          # The download-artifact action creates a directory for each artifact.
-          # So the path to the actual file is ./release-artifacts/ARTIFACT_NAME_AS_UPLOADED/FILENAME_INSIDE_ARTIFACT
-          # In our case, ARTIFACT_NAME_AS_UPLOADED is ${{ env.APP_NAME }}-${{ matrix.final_artifact_suffix }}
-          # and FILENAME_INSIDE_ARTIFACT is also ${{ env.APP_NAME }}-${{ matrix.final_artifact_suffix }}
-          # because the zip-release action creates an archive with that name.
           find ./release-artifacts -type f -print
 
-      - name: Create Release and Upload Assets
+      - name: Create Release and Upload Assets # 创建 Release 并上传 Assets
         uses: softprops/action-gh-release@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -329,15 +311,14 @@ jobs:
           name: Release ${{ github.ref_name }}
           body: |
             自动发布版本 ${{ github.ref_name }}。
-            包含 ODNS Controller 应用程序。
+            包含 CoreDNS Controller 应用程序和自定义 CoreDNS 二进制文件。
             **注意**: 如果您在 macOS 上遇到 "无法打开，因为来自未经验证的开发者" 的问题，
             请尝试在终端中使用 `sudo xattr -cr /Applications/${{ env.APP_NAME }}.app` 命令 (如果安装到 Applications 目录)。
             或者针对下载的 .app 文件: `xattr -cr path/to/your/${{ env.APP_NAME }}.app`
           draft: false
           prerelease: false
-          files: | # 这些路径需要精确匹配下载后的文件结构
+          files: | 
             ./release-artifacts/${{ env.APP_NAME }}-windows-amd64.zip/${{ env.APP_NAME }}-windows-amd64.zip
             ./release-artifacts/${{ env.APP_NAME }}-linux-amd64.tar.gz/${{ env.APP_NAME }}-linux-amd64.tar.gz
             ./release-artifacts/${{ env.APP_NAME }}-macos-amd64.zip/${{ env.APP_NAME }}-macos-amd64.zip
             ./release-artifacts/${{ env.APP_NAME }}-macos-arm64.zip/${{ env.APP_NAME }}-macos-arm64.zip
-
