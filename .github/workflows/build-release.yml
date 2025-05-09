@@ -83,7 +83,7 @@ jobs:
           cd coredns_source_temp
           
           echo "正在修改 CoreDNS 源码中的 plugin.cfg"
-          sed -i '' '50 i vpn-send:github.com/reflyable/odns/vpn-send' plugin.cfg
+          cp ../plugin.cfg ./plugin.cfg
           
           echo "--- coredns_source_temp/plugin.cfg 内容预览 (替换后) ---"
           cat ./plugin.cfg
