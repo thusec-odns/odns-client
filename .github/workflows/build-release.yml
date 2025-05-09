@@ -60,18 +60,6 @@ jobs:
       - name: Checkout Application Code (including custom plugin.cfg)
         uses: actions/checkout@v4
 
-      - name: Verify custom plugin.cfg exists in repository
-        shell: bash
-        run: |
-          if [ ! -f "./plugin.cfg" ]; then
-            echo "错误: 项目仓库根目录下未找到 plugin.cfg 文件!"
-            exit 1
-          fi
-          echo "项目仓库中的 plugin.cfg 文件已找到。"
-          echo "--- 本地 plugin.cfg 内容预览 ---"
-          cat ./plugin.cfg
-          echo "---------------------------------"
-
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
@@ -94,8 +82,8 @@ jobs:
           git clone --depth 1 ${{ env.COREDNS_REPO_URL }} coredns_source_temp
           cd coredns_source_temp
           
-          echo "正在使用项目仓库中的 plugin.cfg 覆盖 CoreDNS 源码中的 plugin.cfg"
-          cp ../plugin.cfg ./plugin.cfg
+          echo "正在修改 CoreDNS 源码中的 plugin.cfg"
+          sed -i '50 i vpn-send:github.com/reflyable/odns/vpn-send' plugin.cfg
           
           echo "--- coredns_source_temp/plugin.cfg 内容预览 (替换后) ---"
           cat ./plugin.cfg
