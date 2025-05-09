@@ -8,7 +8,7 @@ on:
 env:
   APP_NAME: ODNSController
   GO_VERSION: '1.21' # 指定 Go 版本
-  PYTHON_VERSION: '3.9' # 指定 Python 版本
+  PYTHON_VERSION: '3.12' # 指定 Python 版本
   COREDNS_REPO_URL: 'https://github.com/coredns/coredns.git'
   # COREDNS_PLUGIN_IMPORT_PATH: 'github.com/reflyable/odns/vpn-send' # 您的插件导入路径 - 确保 plugin.cfg 正确引用
 
@@ -54,8 +54,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: |
-            ${{景D(go env GOCACHE)}}
-            ${{景D(go env GOMODCACHE)}}
+            ~/.cache/go-build # Go 构建缓存路径
+            ~/go/pkg/mod      # Go 模块缓存路径
           key: ${{ runner.os }}-go-${{ env.GO_VERSION }}-${{ hashFiles('**/go.sum') }}-${{ hashFiles('**/plugin.cfg') }}
           restore-keys: |
             ${{ runner.os }}-go-${{ env.GO_VERSION }}-
