@@ -149,35 +149,12 @@ jobs:
             pip install dmgbuild # dmgbuild 用于创建 macOS DMG
           fi
 
-      - name: Install UPX
-        shell: bash
-        run: |
-          if [[ "${{ matrix.goos }}" == "darwin" ]]; then
-            echo "正在 macOS 上通过 Homebrew 安装 UPX..."
-            brew install upx
-            echo "UPX (macOS) 安装完成。"
-          elif [[ "${{ matrix.goos }}" == "linux" || "${{ matrix.goos }}" == "windows" ]]; then
-            # UPX for Linux/Windows will be handled by crazy-max action later if needed for final app
-            # but we can install it for coredns binary compression if desired.
-            # For simplicity, let's assume crazy-max action makes it available for coredns step too,
-            # or we can use a dedicated step for coredns compression.
-            # The crazy-max action is better placed before it's needed.
-            echo "UPX for Linux/Windows will be installed by crazy-max/ghaction-upx if upx_final_app is true."
-            echo "If you want to compress CoreDNS binary on Lin/Win before PyInstaller, add explicit UPX install here."
-          fi
-          upx --version # 验证 UPX 是否可用 (macOS)
         
       - name: Install UPX Action (for final app on Win/Lin)
         if: matrix.goos == 'linux' || matrix.goos == 'windows'
         uses: crazy-max/ghaction-upx@v3
         with:
           version: latest
-          install-only: true
-      
-      - name: Compress coredns
-        shell: bash
-        run: |
-          upx ${{ matrix.coredns_output_name }}
 
 
       - name: Package PyQt6 Application using build.py
