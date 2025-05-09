@@ -33,7 +33,7 @@ jobs:
             goarch: amd64
             python_arch: x64
             coredns_output_name: coredns # PyInstaller 将查找此名称
-            archive_format: tar.gz
+            archive_format: tar
             final_artifact_suffix: linux-amd64.tar.gz
           - os_display: macOS
             os_runner: macos-13
@@ -70,6 +70,11 @@ jobs:
         shell: pwsh # PowerShell for choco
         run: |
           Write-Host "正在 Windows 上安装 Make..."
+          choco install make --no-progress -y
+          # 验证 make 是否在 PATH 中
+          (Get-Command make).Path
+          Write-Host "Make 安装完成 (或已存在)。"
+          Write-Host "正在 Windows 上安装 Zip..."
           choco install make --no-progress -y
           # 验证 make 是否在 PATH 中
           (Get-Command make).Path
@@ -168,7 +173,7 @@ jobs:
           echo "PyInstaller 构建完成。检查 dist/ 目录..."
           ls -lR dist/
           if [[ "${{ matrix.goos }}" == "darwin" ]]; then
-            if [ ! -d "./dist/${{ env.APP_NAME }}" ]; then
+            if [ ! -d "./dist/${{ env.APP_NAME }}.app" ]; then
               echo "错误: 未找到 macOS 包: ./dist/${{ env.APP_NAME }}"
               exit 1
             fi
@@ -185,33 +190,13 @@ jobs:
           fi
           echo "PyQt6 应用打包成功。"
 
-      - name: Archive Application for Release
-        shell: bash
-        run: |
-          ARCHIVE_NAME="${{ env.APP_NAME }}-${{ matrix.final_artifact_suffix }}"
-          echo "正在创建归档文件: ${ARCHIVE_NAME}"
-          cd dist 
 
-          if [[ "${{ matrix.archive_format }}" == "dmg" ]]; then
-            cd .. 
-            echo "正在创建 DMG 文件..."
-            dmgbuild -s dmg_settings.py "${{ env.APP_NAME }} ${{ matrix.goarch }}" "${ARCHIVE_NAME}" "./dist/${{ env.APP_NAME }}.app"
-            if [ ! -f "${ARCHIVE_NAME}" ]; then
-              echo "错误: DMG 文件创建失败: ${ARCHIVE_NAME}"
-              exit 1
-            fi
-          elif [[ "${{ matrix.archive_format }}" == "zip" ]]; then
-            zip -r -D "../${ARCHIVE_NAME}" .  # -D 确保不存储目录项的时间戳，可能有助于可重现构建
-            cd ..
-          elif [[ "${{ matrix.archive_format }}" == "tar.gz" ]]; then
-            tar --mtime='1970-01-01 00:00Z' --sort=name --owner=0 --group=0 --numeric-owner -czvf "../${ARCHIVE_NAME}" . # 尝试创建可重现的 tar.gz
-            cd ..
-          else
-            echo "错误: 未知的归档格式: ${{ matrix.archive_format }}"
-            exit 1
-          fi
-          echo "归档文件 ${ARCHIVE_NAME} 创建成功。"
-          ls -l "${ARCHIVE_NAME}" 
+      - name: Archive Application for Release(Zip)
+        uses: thedoctor0/zip-release@0.7.5
+        with:
+          type: "${{matrix.archive_format}}"
+          filename: "../${{ env.APP_NAME }}-${{ matrix.final_artifact_suffix }}"
+          directory: ./dist/
 
       - name: Upload Application Artifact for Release
         uses: actions/upload-artifact@v4
